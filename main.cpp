@@ -1,154 +1,113 @@
 #include <iostream>
-#include <vector>
 #include <thread>
-#include <functional>
+#include <vector>
+#include <queue>
 #include <mutex>
 #include <condition_variable>
-#include <queue>
 
-class ThreadPool {
-public:
-    ThreadPool(int numThreads) : stop(false) {
-        for (int i = 0; i < numThreads; ++i) {
-            workers.emplace_back([this] {
-                while (true) {
-                    std::function<void()> task;
-                    {
-                        std::unique_lock<std::mutex> lock(this->queueMutex);
-                        this->condition.wait(lock, [this] { return this->stop || !this->tasks.empty(); });
-                        if (this->stop && this->tasks.empty()) {
-                            return;
-                        }
-                        task = std::move(this->tasks.front());
-                        this->tasks.pop();
-                    }
-                    task();
-                }
-            });
-        }
+const int BUFFER_SIZE = 5;
+const int END_TIME = 20;
+
+std::queue<int> worker1Buffer;
+std::queue<int> worker2Buffer;
+std::queue<int> worker3Buffer;
+std::mutex mtx;
+std::condition_variable worker1CV, worker2CV, worker3CV, worker4CV;
+std::vector<int> data_worker1, data_worker2, data_worker3, result_worker4;
+
+void worker1() {
+    for (int time = 0; time < END_TIME; ++time) {
+        std::unique_lock<std::mutex> lock(mtx);
+        // Wait if worker1Buffer is full
+        worker1CV.wait(lock, [] { return worker1Buffer.size() < BUFFER_SIZE; });
+
+        worker1Buffer.push(time);
+        data_worker1.push_back(time);
+
+        lock.unlock();
+        worker2CV.notify_one();
     }
-
-    template <typename Func>
-    void addTask(Func f) {
-        {
-            std::unique_lock<std::mutex> lock(queueMutex);
-            tasks.emplace(std::function<void()>(f));
-        }
-        condition.notify_one();
-    }
-
-    ~ThreadPool() {
-        {
-            std::unique_lock<std::mutex> lock(queueMutex);
-            stop = true;
-        }
-        condition.notify_all();
-        for (std::thread &worker : workers) {
-            worker.join();
-        }
-    }
-
-    void join() {
-        for (std::thread &worker : workers) {
-            worker.join();
-        }
-    }
-
-private:
-    std::vector<std::thread> workers;
-    std::queue<std::function<void()>> tasks;
-    std::mutex queueMutex;
-    std::condition_variable condition;
-    bool stop;
-};
-
-// Placeholder functions
-void compute_basevar(int t) {
-    // Placeholder implementation for computing base variables
 }
 
-void compute_derivedvar(int t, int i) {
-    // Placeholder implementation for computing derived variables
+void worker2() {
+    for (int time = 0; time < END_TIME; ++time) {
+        std::unique_lock<std::mutex> lock(mtx);
+
+        // Wait if both worker1Buffer is empty and worker2Buffer is full
+        worker2CV.wait(lock, [&] {
+            return !worker1Buffer.empty() && worker2Buffer.size() < BUFFER_SIZE;
+        });
+
+        int time_stamp_to_pass = worker1Buffer.front();
+        worker1Buffer.pop();
+       
+        data_worker2.push_back(time_stamp_to_pass);
+
+        worker2Buffer.push(time_stamp_to_pass);
+        lock.unlock();
+        worker3CV.notify_one();
+        worker1CV.notify_one();
+    }
 }
 
-void compute_regression(int t) {
-    // Placeholder implementation for computing regression
+void worker3() {
+    for (int time = 0; time < END_TIME; ++time) {
+        std::unique_lock<std::mutex> lock(mtx);
+
+        // Wait if both worker2Buffer is empty and worker3Buffer is full
+        worker3CV.wait(lock, [&] {
+            return !worker2Buffer.empty() && worker3Buffer.size() < BUFFER_SIZE;
+        });
+
+        int time_stamp_to_pass = worker2Buffer.front();
+        worker2Buffer.pop();
+       
+        data_worker3.push_back(time_stamp_to_pass);
+
+        worker3Buffer.push(time_stamp_to_pass);
+        lock.unlock();
+        worker4CV.notify_one();
+        worker2CV.notify_one();
+    }
+}
+
+void worker4() {
+    for (int time = 0; time < END_TIME; ++time) {
+        std::unique_lock<std::mutex> lock(mtx);
+        // Wait if worker3Buffer is empty
+        worker4CV.wait(lock, [] { return !worker3Buffer.empty(); });
+
+        int time_stamp_to_process = worker3Buffer.front();
+        worker3Buffer.pop();
+        result_worker4.push_back(time_stamp_to_process);
+
+        lock.unlock();
+        worker3CV.notify_one();
+    }
 }
 
 int main() {
-    const int numThreads = 4;
-    ThreadPool threadPool(numThreads);
+    std::thread worker1Thread(worker1);
+    std::thread worker2Thread(worker2);
+    std::thread worker3Thread(worker3);
+    std::thread worker4Thread(worker4);
 
-    std::vector<int> allTimestamps; // Replace with your actual timestamps
+    worker1Thread.join();
+    worker2Thread.join();
+    worker3Thread.join();
+    worker4Thread.join();
 
-    int last_compute_basevar_t = -1;
-    int last_compute_derivedvar_t = -1;
+    for (const auto &ele : data_worker1) std::cout << ele << " ";
+    std::cout << std::endl;
 
-    for (const int& t : allTimestamps) {
-        std::mutex basevarMutex;
-        std::condition_variable basevarCV;
+    for (const auto &ele : data_worker2) std::cout << ele << " ";
+    std::cout << std::endl;
 
-        int derivedvar_finished_count = 0;
-        std::mutex derivedvarMutex;
-        std::condition_variable derivedvarCV;
+    for (const auto &ele : data_worker3) std::cout << ele << " ";
+    std::cout << std::endl;
 
-        // Compute Base Variables
-        threadPool.addTask([t, &basevarMutex, &basevarCV, &last_compute_basevar_t] {
-            compute_basevar(t);
-            {
-                std::lock_guard<std::mutex> lock(basevarMutex);
-                last_compute_basevar_t = t;
-            }
-            basevarCV.notify_one();
-        });
-
-        // Compute Derived Variables in Parallel
-        for (int i = 0; i < numThreads; ++i) {
-            threadPool.addTask([t, i, &basevarMutex, &basevarCV, &last_compute_basevar_t, &last_compute_derivedvar_t, &derivedvar_finished_count, &derivedvarMutex, &derivedvarCV] {
-                {
-                    std::unique_lock<std::mutex> lock(basevarMutex);
-                    basevarCV.wait(lock, [&last_compute_basevar_t, t] { return last_compute_basevar_t >= t; });
-                }
-
-                compute_derivedvar(t, i);
-
-                {
-                    std::lock_guard<std::mutex> lock(derivedvarMutex);
-                    last_compute_derivedvar_t = t;
-                }
-
-                // Increment the counter and notify
-                {
-                    std::lock_guard<std::mutex> lock(derivedvarMutex);
-                    derivedvar_finished_count++;
-                    if (derivedvar_finished_count == numThreads) {
-                        derivedvarCV.notify_one();
-                    }
-                }
-            });
-        }
-
-        // Perform Regression Computation
-        threadPool.addTask([t, &basevarMutex, &basevarCV, &derivedvarMutex, &derivedvarCV, &derivedvar_finished_count] {
-            {
-                std::unique_lock<std::mutex> lock(basevarMutex);
-                basevarCV.wait(lock, [&last_compute_derivedvar_t, t] { return last_compute_derivedvar_t >= t; });
-            }
-
-            // Wait for all compute_derivedvar computations to complete
-            {
-                std::unique_lock<std::mutex> lock(derivedvarMutex);
-                derivedvarCV.wait(lock, [numThreads, &derivedvar_finished_count] { return derivedvar_finished_count == numThreads; });
-            }
-
-            compute_regression(t);
-        });
-
-        // If you have more computations, add them here using threadPool.addTask
-    }
-
-    // Wait for all tasks to complete
-    threadPool.join();
+    for (const auto &ele : result_worker4) std::cout << ele << " ";
+    std::cout << std::endl;
 
     return 0;
 }
